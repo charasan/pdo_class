@@ -4,11 +4,6 @@ This is an abstract PDO class I wrote, intended to be the base for models in an 
 From past experience, my goal here was to keep the model instances keyed to a specific table. Everything
 passing through here is bound to help prevent SQL injections.
 
-I threw this together over a weekend, and have only had some limited time to test, so hopefully I'll be able to flesh it out a bit better in the coming months.
-
-In addition, I added some methods to make it easier to put together simple queries without
-too much trouble or even advanced MySQL know-how.
-
 This class assumes most tables have a column called "**rowstate**", which I use to indicate whether a record is published, unpublished, or deleted.
 In the future, I plan to make this more customizable as I work on separating this out from my main work and updating this repo.
 
