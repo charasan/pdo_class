@@ -71,7 +71,11 @@
 
         public PDO $DBObj;
 
-        protected string $table;
+        /**
+         * The table this model is keyed to. Concrete subclasses set this, either
+         * as a property default or in their own constructor.
+         */
+        protected string $table = '';
         public bool $allowLogging = true; // user tables get a no
         protected string $select = '*';
         protected string $where = '';
@@ -135,7 +139,13 @@
          */
         final public function cleanData(string $str = ''): string
         {
-            return $this->DBObj->quote($str);
+            $quoted = $this->DBObj->quote($str);
+
+            if ($quoted === false) {
+                throw new PDOException('The current driver cannot quote values.');
+            }
+
+            return $quoted;
         }
 
 
@@ -146,16 +156,11 @@
          *
          * @param string $sql
          *
-         * @return array|bool
+         * @return array Empty when the query matched no rows.
          */
         final public function queryRaw(string $sql = ''): array
         {
-            $res = $this->DBObj->query($sql)->fetchAll();
-
-            if (!$res) {
-                return false;
-            }
-            return $res;
+            return $this->DBObj->query($sql)->fetchAll();
         }
 
         /**
@@ -183,7 +188,8 @@
         final public function addGroupBy(string $groupBy): ?PDO_Model
         {
             if ($this->passesSecurityCheck($groupBy, 'GROUP_BY')) {
-                $this->groupBy = preg_replace('/^group by/i', '', $groupBy, 1) ?? '';
+                $cols = trim(preg_replace('/^group by/i', '', $groupBy, 1) ?? '');
+                $this->groupBy = ($cols !== '') ? 'GROUP BY ' . $cols : '';
                 return $this;
             }
             return null;
@@ -319,6 +325,7 @@
             return match ($retType) {
                 self::RETURN_TYPE_SINGLE_VALUE => $stmt->fetch(),
                 self::RETURN_TYPE_ARRAY => $this->collapseSingleRow($stmt->fetchAll()),
+                self::RETURN_TYPE_STATEMENT => $stmt,
                 self::RETURN_TYPE_RUN_ONLY => $success,
                 default => false,
             };
@@ -409,7 +416,7 @@
         /**
          * @param string $classObj
          *
-         * @return array|object
+         * @return object
          */
         final public function getResultsObject(string $classObj = ''): object
         {
@@ -439,7 +446,7 @@
             if (count($cols) !== count($vals)) {
                 throw new ArgumentCountError('Mismatch of values in INSERT statement.');
             }
-            $sql = 'INSERT INTO ' . $this->table . ' (' . implode(',', $cols) . ') VALUES(';
+            $sql = 'INSERT INTO ' . $this->tableName() . ' (' . implode(',', $cols) . ') VALUES(';
             $valStr = '';
             foreach ($cols as $colName) {
                 if (!empty($valStr)) {
@@ -469,15 +476,11 @@
                 throw new ArgumentCountError('Mismatch of values in UPDATE statement');
             }
 
-            $sql = 'UPDATE ' . $this->table . ' SET ';
-            $setSet = '';
+            $setParts = [];
             foreach ($cols as $colName) {
-                if (!empty($setSet)) {
-                    $setSet .= ',';
-                    $setSet .= $colName . '=' . $this->getBindedPlaceholder($colName);
-                }
+                $setParts[] = $colName . '=' . $this->getBindedPlaceholder($colName, true);
             }
-            $sql .= $setSet . ' ' . $this->where;
+            $sql = 'UPDATE ' . $this->tableName() . ' SET ' . implode(',', $setParts) . ' ' . $this->where;
             return $this->runSimpleQueries($sql, $cols, $vals, self::QUERY_TYPE_UPDATE);
         }
 
@@ -494,7 +497,9 @@
          */
         private function runSimpleQueries(string $sql, array $cols, array $vals, int $queryType): int
         {
-            $params = [];
+            // Seed with the params already bound by addWhere() so the WHERE
+            // placeholders are supplied alongside the SET values.
+            $params = $this->bindParams;
             for ($x = 0; $x < count($cols); $x++) {
                 $params[$this->getBindedPlaceholder($cols[$x])] = $vals[$x];
             }
@@ -519,11 +524,15 @@
             } else {
                 $sql = 'SELECT ' . trim($this->select) . ' ';
             }
-            $sql .= 'FROM ' . $this->table . ' ';
+            $sql .= 'FROM ' . $this->tableName() . ' ';
             if (!empty($this->join)) {
                 $sql .= trim($this->join) . ' ';
             }
             $sql .= trim($this->where) . ' ';
+
+            if (!empty($this->groupBy)) {
+                $sql .= trim($this->groupBy) . ' ';
+            }
 
             if (!empty($this->orderBy)) {
                 $sql .= trim($this->orderBy) . ' ';
@@ -598,6 +607,23 @@
             $this->join = '';
             $this->limit = '';
             $this->orderBy = '';
+            $this->groupBy = '';
+        }
+
+        /**
+         * Guards against a subclass that never set $table.
+         *
+         * @return string
+         */
+        private function tableName(): string
+        {
+            if ($this->table === '') {
+                throw new PDOException(
+                    static::class . ' must set the protected $table property before running a query.'
+                );
+            }
+
+            return $this->table;
         }
 
         /**
