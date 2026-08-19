@@ -15,27 +15,27 @@
      */
     abstract class PDO_Model
     {
-        protected const QUERY_TYPE_UPDATE = 0;
-        protected const QUERY_TYPE_INSERT = 1;
+        protected const int QUERY_TYPE_UPDATE = 0;
+        protected const int QUERY_TYPE_INSERT = 1;
 
-        public const ROWSTATE_DELETED_ROW = 999;
-        public const ROWSTATE_PUBLISHED = 1;
-        public const ROWSTATE_UNPUBLISHED = 0;
+        public const int ROWSTATE_DELETED_ROW = 999;
+        public const int ROWSTATE_PUBLISHED = 1;
+        public const int ROWSTATE_UNPUBLISHED = 0;
 
-        public const PDO_ERROR_CODE_SQLSTATE = 0;
-        public const PDO_ERROR_CODE_DRIVER_SPECIFIC = 1;
-        public const PDO_ERROR_CODE_MESSAGE = 2;
+        public const int PDO_ERROR_CODE_SQLSTATE = 0;
+        public const int PDO_ERROR_CODE_DRIVER_SPECIFIC = 1;
+        public const int PDO_ERROR_CODE_MESSAGE = 2;
 
-        public const RETURN_TYPE_SINGLE_VALUE = 0;
-        public const RETURN_TYPE_ARRAY = 1;
-        public const RETURN_TYPE_STATEMENT = 2;
-        public const RETURN_TYPE_RUN_ONLY = 3;
+        public const int RETURN_TYPE_SINGLE_VALUE = 0;
+        public const int RETURN_TYPE_ARRAY = 1;
+        public const int RETURN_TYPE_STATEMENT = 2;
+        public const int RETURN_TYPE_RUN_ONLY = 3;
 
-        public const COMPARISON_LIKE = 'LIKE';
-        public const COMPARISON_IS_NULL = 'IS NULL';
-        public const COMPARISON_IS_NOT_NULL = 'IS NOT NULL';
+        public const string COMPARISON_LIKE = 'LIKE';
+        public const string COMPARISON_IS_NULL = 'IS NULL';
+        public const string COMPARISON_IS_NOT_NULL = 'IS NOT NULL';
 
-        public const COMPARISON_OPERATORS = [
+        public const array COMPARISON_OPERATORS = [
             '=',
             '!=',
             '<>',
@@ -53,15 +53,15 @@
             'exists'
         ];
 
-        public const ORDER_BY_DIR_DESC = 'DESC';
-        public const ORDER_BY_DIR_ASC = 'ASC';
+        public const string ORDER_BY_DIR_DESC = 'DESC';
+        public const string ORDER_BY_DIR_ASC = 'ASC';
 
-        public const WHERE_CLAUSE_WHERE = 'WHERE';
-        public const WHERE_CLAUSE_AND = 'AND';
-        public const WHERE_CLAUSE_OR = 'OR';
-        public const WHERE_CLAUSE_IN = 'IN';
-        public const WHERE_CLAUSE_NOT_IN = 'NOT IN';
-        public const WHERE_CLAUSE_TYPES = [
+        public const string WHERE_CLAUSE_WHERE = 'WHERE';
+        public const string WHERE_CLAUSE_AND = 'AND';
+        public const string WHERE_CLAUSE_OR = 'OR';
+        public const string WHERE_CLAUSE_IN = 'IN';
+        public const string WHERE_CLAUSE_NOT_IN = 'NOT IN';
+        public const array WHERE_CLAUSE_TYPES = [
             self::WHERE_CLAUSE_AND,
             self::WHERE_CLAUSE_WHERE,
             self::WHERE_CLAUSE_IN,
@@ -91,7 +91,7 @@
          */
         public function __construct(array $connectionOptions = [], array $dbOptions = [])
         {
-            $this->allowLogging = (bool)$_SERVER['SITE_DEBUG'];
+            $this->allowLogging = (bool)($_SERVER['SITE_DEBUG'] ?? false);
 
             $connectionInfo = [
                 'Host' => '',
@@ -105,15 +105,10 @@
             $connectionInfo = array_replace($connectionInfo, $connectionOptions);
 
             if (empty($connectionOptions)) { // use the env values
-                try {
-                    $connectionInfo['Host'] = $_SERVER['CHAR_DB_HOST'];
-                    $connectionInfo['User'] = $_SERVER['CHAR_DB_USER'];
-                    $connectionInfo['Password'] = $_SERVER['CHAR_DB_PASS'];
-                    $connectionInfo['Database'] = $_SERVER['CHAR_DB_DBNAME'];
-                } catch (Throwable $throwable) {
-                    error_log($throwable->getMessage() . ": " . $throwable->getTraceAsString());
-                    exit('Unable to retrieve database credentials at this time. Please try again later.');
-                }
+                $connectionInfo['Host'] = $_SERVER['CHAR_DB_HOST'] ?? '';
+                $connectionInfo['User'] = $_SERVER['CHAR_DB_USER'] ?? '';
+                $connectionInfo['Password'] = $_SERVER['CHAR_DB_PASS'] ?? '';
+                $connectionInfo['Database'] = $_SERVER['CHAR_DB_DBNAME'] ?? '';
             }
             $dsn = $connectionInfo['Driver'] . ':host=' . $connectionInfo['Host'] . (!empty($connectionInfo['Port']) ?
                     (';port=' . $connectionInfo['Port']) : '') . ';dbname=' . $connectionInfo['Database'] . ';charset=utf8mb4';
@@ -201,12 +196,17 @@
          *
          * @param string $col
          * @param string $comparator
-         * @param string|bool $val
+         * @param mixed $val
          * @param string $clause
          *
          * @return PDO_Model|null
          */
-        final public function addWhere(string $col, string $comparator = '=', $val = false, $clause = ''): ?PDO_Model
+        final public function addWhere(
+            string $col,
+            string $comparator = '=',
+            mixed $val = false,
+            string $clause = ''
+        ): ?PDO_Model
         {
             $closePar = false;
             $col = preg_replace('/^where /i', '', $col, 1) ?? '';
@@ -282,7 +282,7 @@
          *
          * @return $this|null
          */
-        final public function addOrderBy(string $cols, $dir = self::ORDER_BY_DIR_DESC): ?PDO_Model
+        final public function addOrderBy(string $cols, string $dir = self::ORDER_BY_DIR_DESC): ?PDO_Model
         {
             $this->orderBy = 'ORDER BY ' . $cols . ' ' . $dir;
             return $this;
@@ -308,27 +308,30 @@
          * @param array $data
          * @param int $retType
          *
-         * @return mixed|array|bool
+         * @return mixed
          */
-        final public function preparedQuery(string $sql, array $data, int $retType = self::RETURN_TYPE_ARRAY)
+        final public function preparedQuery(string $sql, array $data, int $retType = self::RETURN_TYPE_ARRAY): mixed
         {
             $stmt = $this->DBObj->prepare($sql);
             if ($success = $stmt->execute($data)) {
                 $this->_stmt = $stmt;
             }
-            switch ($retType) {
-                case self::RETURN_TYPE_SINGLE_VALUE:
-                    return $stmt->fetch();
-                case self::RETURN_TYPE_ARRAY:
-                    $ret = $stmt->fetchAll();
-                    if (sizeof($ret) == 1) {
-                        $ret = $ret[0];
-                    }
-                    return $ret;
-                case self::RETURN_TYPE_RUN_ONLY:
-                    return $success;
-            }
-            return false;
+            return match ($retType) {
+                self::RETURN_TYPE_SINGLE_VALUE => $stmt->fetch(),
+                self::RETURN_TYPE_ARRAY => $this->collapseSingleRow($stmt->fetchAll()),
+                self::RETURN_TYPE_RUN_ONLY => $success,
+                default => false,
+            };
+        }
+
+        /**
+         * @param array $rows
+         *
+         * @return array
+         */
+        private function collapseSingleRow(array $rows): array
+        {
+            return (count($rows) === 1) ? $rows[0] : $rows;
         }
 
         /**
@@ -337,7 +340,7 @@
          *
          * @return mixed
          */
-        final public function preparedQueryScalar(string $sql, array $data)
+        final public function preparedQueryScalar(string $sql, array $data): mixed
         {
             return $this->preparedQuery($sql, $data, self::RETURN_TYPE_SINGLE_VALUE);
         }
@@ -408,7 +411,7 @@
          *
          * @return array|object
          */
-        final public function getResultsObject(string $classObj = '')
+        final public function getResultsObject(string $classObj = ''): object
         {
             $sql = $this->buildSelectQuery();
             $ret = $this->preparedQuery($sql, $this->bindParams);
@@ -433,7 +436,7 @@
          */
         final public function simpleInsert(array $cols, array $vals): int
         {
-            if (sizeof($cols) !== sizeof($vals)) {
+            if (count($cols) !== count($vals)) {
                 throw new ArgumentCountError('Mismatch of values in INSERT statement.');
             }
             $sql = 'INSERT INTO ' . $this->table . ' (' . implode(',', $cols) . ') VALUES(';
@@ -462,7 +465,7 @@
             if (empty($this->where)) {
                 throw new PDOException('This tool cannot be used to update all table data indiscriminately.');
             }
-            if (sizeof($cols) !== sizeof($vals)) {
+            if (count($cols) !== count($vals)) {
                 throw new ArgumentCountError('Mismatch of values in UPDATE statement');
             }
 
@@ -492,7 +495,7 @@
         private function runSimpleQueries(string $sql, array $cols, array $vals, int $queryType): int
         {
             $params = [];
-            for ($x = 0; $x < sizeof($cols); $x++) {
+            for ($x = 0; $x < count($cols); $x++) {
                 $params[$this->getBindedPlaceholder($cols[$x])] = $vals[$x];
             }
             $this->runPreparedQuery($sql, $params);
@@ -508,7 +511,7 @@
          *
          * @return string
          */
-        final private function buildSelectQuery(bool $isDelete = false): string
+        private function buildSelectQuery(bool $isDelete = false): string
         {
             // start with the select
             if ($isDelete && $isDelete === $this->isDelete) {
@@ -543,7 +546,7 @@
          *
          * @return string
          */
-        final private function interpolateQuery(string $query, array $params): string
+        private function interpolateQuery(string $query, array $params): string
         {
             $keys = [];
 
@@ -563,12 +566,12 @@
             return $query;
         }
 
-        final private function getBindedPlaceholder(string $colName, bool $inQuery = false): string
+        private function getBindedPlaceholder(string $colName, bool $inQuery = false): string
         {
             return ($inQuery ? ':' : '') . str_replace([' ', '_', '-', '.'], '', ucwords($colName));
         }
 
-        final private function addBindParam(string $col, $val): bool
+        private function addBindParam(string $col, mixed $val): bool
         {
             $colKey = $this->getBindedPlaceholder($col);
             if (array_key_exists($colKey, $this->bindParams)) {
@@ -587,7 +590,7 @@
         /**
          * Clear out the instance so a fresh query can be ran.
          */
-        final private function clearMethodVars(): void
+        private function clearMethodVars(): void
         {
             $this->select = '*';
             $this->where = '';
@@ -606,11 +609,10 @@
          *
          * @return bool
          */
-        final private function passesSecurityCheck(string $str, string $type)
+        private function passesSecurityCheck(string $str, string $type): bool
         {
-            if (strstr(strtolower($str), 'delete from') !== false || strstr(strtolower($str), 'drop table') !== false) {
-                return false;
-            }
-            return true;
+            $needle = strtolower($str);
+
+            return !str_contains($needle, 'delete from') && !str_contains($needle, 'drop table');
         }
     }
