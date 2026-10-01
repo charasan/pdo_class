@@ -3,6 +3,7 @@
     namespace PDO_Model;
 
     use ArgumentCountError;
+    use InvalidArgumentException;
     use PDO;
     use PDOException;
     use PDOStatement;
@@ -44,13 +45,9 @@
             '<',
             '<=',
             '>=',
-            'in',
-            'not',
-            'between',
             'is null',
             'is not null',
-            'like',
-            'exists'
+            'like'
         ];
 
         public const string ORDER_BY_DIR_DESC = 'DESC';
@@ -59,15 +56,17 @@
         public const string WHERE_CLAUSE_WHERE = 'WHERE';
         public const string WHERE_CLAUSE_AND = 'AND';
         public const string WHERE_CLAUSE_OR = 'OR';
-        public const string WHERE_CLAUSE_IN = 'IN';
-        public const string WHERE_CLAUSE_NOT_IN = 'NOT IN';
         public const array WHERE_CLAUSE_TYPES = [
             self::WHERE_CLAUSE_AND,
             self::WHERE_CLAUSE_WHERE,
-            self::WHERE_CLAUSE_IN,
-            self::WHERE_CLAUSE_NOT_IN,
             self::WHERE_CLAUSE_OR
         ];
+
+        // A column or table name, optionally qualified: user_id, u.user_id
+        private const string IDENTIFIER_PATTERN = '/^[A-Za-z_][\w.]*$/';
+        // One item of a select list: *, u.*, a column, or a simple aggregate, with an optional alias
+        private const string SELECT_ITEM_PATTERN =
+            '/^(\*|[A-Za-z_][\w.]*(\.\*)?|(COUNT|SUM|MIN|MAX|AVG)\((\*|[A-Za-z_][\w.]*)\))(\s+AS\s+[A-Za-z_]\w*)?$/i';
 
         public PDO $DBObj;
 
@@ -76,7 +75,6 @@
          * as a property default or in their own constructor.
          */
         protected string $table = '';
-        public bool $allowLogging = true; // user tables get a no
         protected string $select = '*';
         protected string $where = '';
         protected string $join = '';
@@ -84,7 +82,6 @@
         protected string $groupBy = '';
         protected string $limit = '';
         protected array $bindParams = [];
-        private bool $isDelete = false;
         protected PDOStatement $_stmt;
 
         /**
@@ -95,8 +92,6 @@
          */
         public function __construct(array $connectionOptions = [], array $dbOptions = [])
         {
-            $this->allowLogging = (bool)($_SERVER['SITE_DEBUG'] ?? false);
-
             $connectionInfo = [
                 'Host' => '',
                 'Port' => '',
@@ -151,8 +146,7 @@
 
         /**
          * USE WITH CAUTION
-         * This takes a raw SQL query and runs it AS IS.
-         * The query in question is logged.
+         * This takes a raw SQL query and runs it AS IS, with no binding or checks.
          *
          * @param string $sql
          *
@@ -169,30 +163,30 @@
          *
          * @param string $select
          *
-         * @return PDO_Model|null
+         * @return PDO_Model
          */
-        final public function addSelect(string $select = '*'): ?PDO_Model
+        final public function addSelect(string $select = '*'): PDO_Model
         {
-            if ($this->passesSecurityCheck($select, 'SELECT')) {
-                $this->select = preg_replace('/^select /i', '', $select, 1) ?? '*';
-                return $this;
+            $select = preg_replace('/^select /i', '', trim($select), 1) ?? '';
+            foreach (explode(',', $select) as $item) {
+                if (!preg_match(self::SELECT_ITEM_PATTERN, trim($item))) {
+                    throw new InvalidArgumentException('Invalid select item: ' . $item);
+                }
             }
-            return null;
+            $this->select = $select;
+            return $this;
         }
 
         /**
          * @param string $groupBy
          *
-         * @return $this|null
+         * @return $this
          */
-        final public function addGroupBy(string $groupBy): ?PDO_Model
+        final public function addGroupBy(string $groupBy): PDO_Model
         {
-            if ($this->passesSecurityCheck($groupBy, 'GROUP_BY')) {
-                $cols = trim(preg_replace('/^group by/i', '', $groupBy, 1) ?? '');
-                $this->groupBy = ($cols !== '') ? 'GROUP BY ' . $cols : '';
-                return $this;
-            }
-            return null;
+            $cols = trim(preg_replace('/^group by/i', '', $groupBy, 1) ?? '');
+            $this->groupBy = ($cols !== '') ? 'GROUP BY ' . $this->checkColumnList($cols) : '';
+            return $this;
         }
 
         /**
@@ -214,20 +208,21 @@
             string $clause = ''
         ): ?PDO_Model
         {
-            $closePar = false;
             $col = preg_replace('/^where /i', '', $col, 1) ?? '';
             $col = preg_replace('/^and /i', '', $col, 1) ?? '';
-            $col = preg_replace('/^or /i', '', $col, 1) ?? '';
+            $col = $this->checkIdentifier(preg_replace('/^or /i', '', $col, 1) ?? '');
 
             // test the comparison being passed in
             if (!in_array(strtolower($comparator), self::COMPARISON_OPERATORS)) {
                 throw new PDOException('For more complex queries, use one of the more advanced methods.');
             }
+            $isNullCheck = in_array(
+                strtoupper($comparator),
+                [self::COMPARISON_IS_NULL, self::COMPARISON_IS_NOT_NULL]
+            );
             if (strtoupper($comparator) == self::COMPARISON_LIKE) {
                 $val = '%' . $val . '%';
-            } elseif ((strtoupper($comparator) === self::COMPARISON_IS_NOT_NULL || strtoupper(
-                        $comparator
-                    ) === self::COMPARISON_IS_NULL) && !empty($val)) {
+            } elseif ($isNullCheck && !empty($val)) {
                 throw new PDOException('Value should not be passed for this.');
             }
 
@@ -237,49 +232,48 @@
                 $this->where .= self::WHERE_CLAUSE_WHERE . ' ';
             } elseif (empty($clause)) {
                 $this->where .= self::WHERE_CLAUSE_AND . ' ';
-            } elseif (in_array(strtoupper($clause), [self::WHERE_CLAUSE_NOT_IN, self::WHERE_CLAUSE_IN])) {
-                $this->where .= strtoupper($clause) . ' (';
-                $closePar = true;
             } elseif (!in_array(strtoupper($clause), self::WHERE_CLAUSE_TYPES)) {
                 throw new PDOException('Invalid conditional type passed to where statement.');
             } else {
                 $this->where .= strtoupper($clause) . ' ';
             }
-            $this->addBindParam($col, $val);
-            $this->where .= $col . ' ' . $comparator . ' ' . (($val !== false) ? $this->getBindedPlaceholder(
-                    $col,
-                    true
-                ) : '') . ' ';
-            if ($closePar) {
-                $this->where .= ')';
+            $this->where .= $col . ' ' . $comparator . ' ';
+            if (!$isNullCheck) {
+                // IS NULL takes no value, so there's nothing to bind
+                $this->where .= ':' . $this->addBindParam($col, $val) . ' ';
             }
 
             return $this;
         }
 
         /**
-         * @param string $joinedTable The table to be joined in the statement - can/should add alias with a space in name
-         * @param string $tableNickname
+         * @param string $joinedTable The table to be joined in the statement
+         * @param string $tableNickname Optional alias for the joined table
          * @param array $onStatement Array of conditions for the ON statement of the join - added to bound parameters
          *
-         * @return PDO_Model|null
+         * @return PDO_Model
          * @todo Expand onStatement to allow more comparisons beyond the forced equal
          */
         final public function addJoin(
             string $joinedTable,
             string $tableNickname = '',
             array $onStatement = []
-        ): ?PDO_Model {
-            if ($this->passesSecurityCheck($joinedTable, 'JOIN')) {
-                $this->join = preg_replace('/^join /i', '', $joinedTable, 1) ?? '*';
-                foreach ($onStatement as $col => $joinParam) {
-                    $this->join .= 'JOIN ' . $joinedTable . (!empty($tableNickname) ? $tableNickname : '') .
-                        ' ON ' . $col . ' = ' . $this->getBindedPlaceholder($col);
-                    $this->addBindParam($col, $joinParam);
-                }
-                return $this;
+        ): PDO_Model {
+            $joinedTable = $this->checkIdentifier(preg_replace('/^join /i', '', trim($joinedTable), 1) ?? '');
+            $this->join .= ' JOIN ' . $joinedTable;
+            if ($tableNickname !== '') {
+                $this->join .= ' ' . $this->checkIdentifier($tableNickname);
             }
-            return null;
+
+            $conditions = [];
+            foreach ($onStatement as $col => $joinParam) {
+                $col = $this->checkIdentifier($col);
+                $conditions[] = $col . ' = :' . $this->addBindParam($col, $joinParam);
+            }
+            if (!empty($conditions)) {
+                $this->join .= ' ON ' . implode(' AND ', $conditions);
+            }
+            return $this;
         }
 
         /**
@@ -288,9 +282,13 @@
          *
          * @return $this|null
          */
-        final public function addOrderBy(string $cols, string $dir = self::ORDER_BY_DIR_DESC): ?PDO_Model
+        final public function addOrderBy(string $cols, string $dir = self::ORDER_BY_DIR_DESC): PDO_Model
         {
-            $this->orderBy = 'ORDER BY ' . $cols . ' ' . $dir;
+            $dir = strtoupper($dir);
+            if (!in_array($dir, [self::ORDER_BY_DIR_ASC, self::ORDER_BY_DIR_DESC])) {
+                throw new InvalidArgumentException('Order by direction must be ASC or DESC.');
+            }
+            $this->orderBy = 'ORDER BY ' . $this->checkColumnList($cols) . ' ' . $dir;
             return $this;
         }
 
@@ -324,21 +322,11 @@
             }
             return match ($retType) {
                 self::RETURN_TYPE_SINGLE_VALUE => $stmt->fetch(),
-                self::RETURN_TYPE_ARRAY => $this->collapseSingleRow($stmt->fetchAll()),
+                self::RETURN_TYPE_ARRAY => $stmt->fetchAll(),
                 self::RETURN_TYPE_STATEMENT => $stmt,
                 self::RETURN_TYPE_RUN_ONLY => $success,
                 default => false,
             };
-        }
-
-        /**
-         * @param array $rows
-         *
-         * @return array
-         */
-        private function collapseSingleRow(array $rows): array
-        {
-            return (count($rows) === 1) ? $rows[0] : $rows;
         }
 
         /**
@@ -370,7 +358,8 @@
             $sql = $this->buildSelectQuery();
             $ret = $this->preparedQuery($sql, $this->bindParams, self::RETURN_TYPE_SINGLE_VALUE);
             $this->clearMethodVars();
-            return $ret;
+            // fetch() returns false when no row matched
+            return ($ret === false) ? null : $ret;
         }
 
         final public function isPublished(): PDO_Model
@@ -404,13 +393,8 @@
             if (empty($this->where)) {
                 throw new PDOException('This tool cannot be used to delete data indiscriminately.');
             }
+            // In this library we set the rowstate to 999 rather than deleting, to preserve data.
             return $this->simpleUpdate(['rowstate'], [self::ROWSTATE_DELETED_ROW]);
-            /*          // For a formal delete - in this library we set the rowstate to 999 to preserve data.
-                        $this->isDelete = true;
-                        $sql = $this->buildSelectQuery();
-                        $this->isDelete = false;
-                        $this->runPreparedQuery($sql, $this->bindParams);
-                        return $this->_stmt->rowCount(); */
         }
 
         /**
@@ -446,16 +430,14 @@
             if (count($cols) !== count($vals)) {
                 throw new ArgumentCountError('Mismatch of values in INSERT statement.');
             }
-            $sql = 'INSERT INTO ' . $this->tableName() . ' (' . implode(',', $cols) . ') VALUES(';
-            $valStr = '';
-            foreach ($cols as $colName) {
-                if (!empty($valStr)) {
-                    $valStr .= ',';
-                }
-                $valStr .= $this->getBindedPlaceholder($colName, true);
+            $placeholders = [];
+            foreach (array_values($cols) as $x => $colName) {
+                $this->checkIdentifier($colName);
+                $placeholders[] = ':' . $this->addBindParam($colName, $vals[$x]);
             }
-            $sql .= $valStr . ');';
-            return $this->runSimpleQueries($sql, $cols, $vals, self::QUERY_TYPE_INSERT);
+            $sql = 'INSERT INTO ' . $this->tableName() . ' (' . implode(',', $cols) . ') VALUES(' .
+                implode(',', $placeholders) . ');';
+            return $this->runSimpleQueries($sql, self::QUERY_TYPE_INSERT);
         }
 
         /**
@@ -476,12 +458,14 @@
                 throw new ArgumentCountError('Mismatch of values in UPDATE statement');
             }
 
+            // addBindParam() hands back a key that doesn't collide with the WHERE
+            // params, so SET rowstate and WHERE rowstate each get their own value.
             $setParts = [];
-            foreach ($cols as $colName) {
-                $setParts[] = $colName . '=' . $this->getBindedPlaceholder($colName, true);
+            foreach (array_values($cols) as $x => $colName) {
+                $setParts[] = $this->checkIdentifier($colName) . '=:' . $this->addBindParam($colName, $vals[$x]);
             }
             $sql = 'UPDATE ' . $this->tableName() . ' SET ' . implode(',', $setParts) . ' ' . $this->where;
-            return $this->runSimpleQueries($sql, $cols, $vals, self::QUERY_TYPE_UPDATE);
+            return $this->runSimpleQueries($sql, self::QUERY_TYPE_UPDATE);
         }
 
         /**
@@ -489,21 +473,13 @@
          * Returns lastInsertID for inserts, and affected rows count for updates.
          *
          * @param string $sql
-         * @param array $cols
-         * @param array $vals
          * @param int $queryType
          *
          * @return int
          */
-        private function runSimpleQueries(string $sql, array $cols, array $vals, int $queryType): int
+        private function runSimpleQueries(string $sql, int $queryType): int
         {
-            // Seed with the params already bound by addWhere() so the WHERE
-            // placeholders are supplied alongside the SET values.
-            $params = $this->bindParams;
-            for ($x = 0; $x < count($cols); $x++) {
-                $params[$this->getBindedPlaceholder($cols[$x])] = $vals[$x];
-            }
-            $this->runPreparedQuery($sql, $params);
+            $this->runPreparedQuery($sql, $this->bindParams);
             if ($queryType === self::QUERY_TYPE_INSERT) {
                 return $this->DBObj->lastInsertId();
             } else {
@@ -512,18 +488,11 @@
         }
 
         /**
-         * @param bool $isDelete
-         *
          * @return string
          */
-        private function buildSelectQuery(bool $isDelete = false): string
+        private function buildSelectQuery(): string
         {
-            // start with the select
-            if ($isDelete && $isDelete === $this->isDelete) {
-                $sql = 'DELETE ';
-            } else {
-                $sql = 'SELECT ' . trim($this->select) . ' ';
-            }
+            $sql = 'SELECT ' . trim($this->select) . ' ';
             $sql .= 'FROM ' . $this->tableName() . ' ';
             if (!empty($this->join)) {
                 $sql .= trim($this->join) . ' ';
@@ -544,56 +513,33 @@
             return $sql;
         }
 
+        private function getBindedPlaceholder(string $colName): string
+        {
+            return str_replace([' ', '_', '-', '.'], '', ucwords($colName));
+        }
+
         /**
-         * This should be used for LOGGING ONLY
+         * Binds a value and returns the placeholder key it was stored under.
+         * Callers must use the returned key in their SQL: if the column is
+         * already bound (rowstate twice, say) a number is appended so the
+         * earlier value isn't overwritten.
          *
-         * Manually replaced binding placeholders with actual values so a full
-         * query can be logged if necessary.
-         *
-         * @param string $query
-         * @param array $params
+         * @param string $col
+         * @param mixed $val
          *
          * @return string
          */
-        private function interpolateQuery(string $query, array $params): string
+        private function addBindParam(string $col, mixed $val): string
         {
-            $keys = [];
-
-            # build a regular expression for each parameter
-            foreach ($params as $key => $value) {
-                if (is_string($key)) {
-                    $keys[] = '/:' . $key . '/';
-                } else {
-                    $keys[] = '/[?]/';
-                }
-            }
-
-            $query = preg_replace($keys, $params, $query, 1, $count);
-
-            #trigger_error('replaced '.$count.' keys');
-
-            return $query;
-        }
-
-        private function getBindedPlaceholder(string $colName, bool $inQuery = false): string
-        {
-            return ($inQuery ? ':' : '') . str_replace([' ', '_', '-', '.'], '', ucwords($colName));
-        }
-
-        private function addBindParam(string $col, mixed $val): bool
-        {
-            $colKey = $this->getBindedPlaceholder($col);
-            if (array_key_exists($colKey, $this->bindParams)) {
-                $matches = [];
-                if (preg_match('/(\d+)$/', $colKey, $matches)) {
-                    $inc = (int)($matches[1] ?? 0);
-                    $colKey = trim(str_replace($inc, '', $colKey));
-                    $colKey = $colKey . (++$inc);
-                }
+            $baseKey = $this->getBindedPlaceholder($col);
+            $colKey = $baseKey;
+            $inc = 1;
+            while (array_key_exists($colKey, $this->bindParams)) {
+                $colKey = $baseKey . (++$inc);
             }
 
             $this->bindParams[$colKey] = $val;
-            return true;
+            return $colKey;
         }
 
         /**
@@ -627,18 +573,31 @@
         }
 
         /**
-         * Check for common attack vectors and cut them off.
-         * Probably not super helpful, but can't hurt.
+         * Identifiers (columns, tables) can't be bound, so anything that ends up
+         * in the SQL as a name has to match IDENTIFIER_PATTERN.
          *
-         * @param string $str
-         * @param string $type
+         * @param string $name
          *
-         * @return bool
+         * @return string The trimmed name
          */
-        private function passesSecurityCheck(string $str, string $type): bool
+        private function checkIdentifier(string $name): string
         {
-            $needle = strtolower($str);
+            $name = trim($name);
+            if (!preg_match(self::IDENTIFIER_PATTERN, $name)) {
+                throw new InvalidArgumentException('Invalid identifier: ' . $name);
+            }
+            return $name;
+        }
 
-            return !str_contains($needle, 'delete from') && !str_contains($needle, 'drop table');
+        /**
+         * Checks a comma separated list of columns, as used by ORDER BY and GROUP BY.
+         *
+         * @param string $cols
+         *
+         * @return string
+         */
+        private function checkColumnList(string $cols): string
+        {
+            return implode(', ', array_map([$this, 'checkIdentifier'], explode(',', $cols)));
         }
     }
